@@ -407,8 +407,9 @@ def delete_yaml_key_preserve_formatting(file_path: Path, key_name: str, expected
             # Block value: key: followed by indented content on next lines
             i += 1
             
-            # Skip all lines that are more indented than the key
+            # Skip all lines that are more indented than the key, or list items at the same level
             # This handles nested structures like arrays and objects
+            # Note: In YAML, list items at the same indentation as the key are part of the value
             while i < len(lines):
                 next_line = lines[i]
                 
@@ -419,8 +420,31 @@ def delete_yaml_key_preserve_formatting(file_path: Path, key_name: str, expected
                 
                 # Calculate indentation of next line
                 next_indent = len(next_line) - len(next_line.lstrip())
+                next_stripped = next_line.lstrip()
                 
-                # If next line is at same or less indentation, we've reached the end of this block
+                # If next line is at same indentation and starts with '-' (list item), it's part of the value
+                # Example: "tolerations:\n- key: role" - the list item is part of tolerations
+                # SAFEGUARD: Only delete lines starting with '-' - other keys at same level are preserved
+                if next_indent == indent and next_stripped.startswith('-'):
+                    # This is a list item at the same level - delete it and its nested content
+                    i += 1
+                    # Continue to delete nested content of this list item
+                    while i < len(lines):
+                        nested_line = lines[i]
+                        if not nested_line.strip():
+                            i += 1
+                            continue
+                        nested_indent = len(nested_line) - len(nested_line.lstrip())
+                        # Stop when we hit a line at same or less indentation as the list item
+                        if nested_indent <= next_indent:
+                            break
+                        i += 1
+                    # Continue to check if there are more list items at the same level
+                    continue
+                
+                # If next line is at same or less indentation (and NOT a list item), we've reached the end
+                # This could be another key (e.g., "affinity:") or end of file - stop deleting
+                # SAFEGUARD: This ensures we never delete other keys at the same level
                 if next_indent <= indent:
                     break
                 

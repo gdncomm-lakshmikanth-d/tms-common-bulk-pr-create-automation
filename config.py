@@ -91,7 +91,22 @@ CHANGE_RULES = [
 # Format: owner/repo (e.g., "gdncomm/nonprod-deployment-gdn-tms-api")
 # You can also use full GitHub URLs - they will be automatically normalized
 REPOS = [
-    "gdncomm/nonprod-deployment-gdn-osrm-backend"
+    "gdncomm/nonprod-deployment-gdn-osrm-backend",
+    "gdncomm/nonprod-deployment-gdn-tms-authentication",
+    "gdncomm/nonprod-deployment-gdn-tms-api",
+    "gdncomm/nonprod-deployment-gdn-tms-ui-main",
+    "gdncomm/nonprod-deployment-gdn-tms-shipment",
+    "gdncomm/nonprod-deployment-gdn-tms-control-center",
+    "gdncomm/nonprod-deployment-gdn-tms-hub-management",
+    "gdncomm/nonprod-deployment-gdn-tms-search"
+    "gdncomm/nonprod-deployment-gdn-tms-instant-trip",
+    "gdncomm/nonprod-deployment-gdn-tms-external-gateway",
+    "gdncomm/nonprod-deployment-gdn-tms-gateway",
+    "gdncomm/nonprod-deployment-gdn-tms-engagement",
+    "gdncomm/nonprod-deployment-gdn-tms-user-management"
+    "gdncomm/nonprod-deployment-gdn-tms-pricing",
+    "gdncomm/nonprod-deployment-gdn-tms-maps",
+    "gdncomm/nonprod-deployment-gdn-tms-bes-packet"
 ]
 
 # ============================================================================
@@ -111,7 +126,7 @@ BRANCH_NAME = "update-jenkins-library-2.2.6"
 # Base branch for PR (the branch the PR will be merged into)
 # Set to None to use the repository's default branch (usually main or master)
 # Set to a branch name (e.g., "qa2") to target a specific branch
-DEFAULT_BASE_BRANCH = "qa2"  # Change to None to use default branch, or "qa2" to target qa2 branch
+DEFAULT_BASE_BRANCH = "preprod"  # Change to None to use default branch, or "qa2" to target qa2 branch
 
 # Debug mode: if True, keep cloned repos in CLONE_DIR for inspection; if False, delete all clones after run.
 DEBUG = False
