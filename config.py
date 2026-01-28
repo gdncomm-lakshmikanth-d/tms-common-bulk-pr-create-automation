@@ -23,6 +23,24 @@ CHANGE_RULES = [
                 "replacement": "@Library('gcp-jenkins-library@2.2.6')"
             }
         ]
+    },
+    {
+        "file": "deployment/values.yaml",
+        "type": "yaml",
+        "changes": [
+            # Remove tolerations only if it contains an item with key: role
+            {
+                "action": "delete_key",
+                "path": "tolerations",
+                "value": [{"key": "role"}]
+            },
+            # Remove affinity only if it has nodeAffinity
+            {
+                "action": "delete_key",
+                "path": "affinity",
+                "value": {"nodeAffinity": {}}
+            }
+        ]
     }
     # Example: To modify deployment/qa2/values.yaml, add a rule like this:
     # {
@@ -73,8 +91,7 @@ CHANGE_RULES = [
 # Format: owner/repo (e.g., "gdncomm/nonprod-deployment-gdn-tms-api")
 # You can also use full GitHub URLs - they will be automatically normalized
 REPOS = [
-    "gdncomm/nonprod-deployment-gdn-tms-api",
-    "gdncomm/nonprod-deployment-gdn-tms-authentication",
+    "gdncomm/nonprod-deployment-gdn-osrm-backend"
 ]
 
 # ============================================================================
@@ -82,7 +99,7 @@ REPOS = [
 # ============================================================================
 
 # Default commit message
-DEFAULT_COMMIT_MESSAGE = "chore: update gcp-jenkins-library to 2.2.6"
+DEFAULT_COMMIT_MESSAGE = "chore: remove tolerations and affinity"
 
 # PR title and body
 DEFAULT_PR_TITLE = "Update gcp-jenkins-library to 2.2.6"
@@ -95,6 +112,15 @@ BRANCH_NAME = "update-jenkins-library-2.2.6"
 # Set to None to use the repository's default branch (usually main or master)
 # Set to a branch name (e.g., "qa2") to target a specific branch
 DEFAULT_BASE_BRANCH = "qa2"  # Change to None to use default branch, or "qa2" to target qa2 branch
+
+# Debug mode: if True, keep cloned repos in CLONE_DIR for inspection; if False, delete all clones after run.
+DEBUG = False
+
+# Clone directory: used when DEBUG is True or when --clone-dir is set. Set to None to use a temp dir when not debugging.
+CLONE_DIR = "bulk_pr_clones"
+
+# Whether to delete the clone directory after the run when using CLONE_DIR (overridden by DEBUG and --cleanup).
+CLEANUP_CLONE_DIR = False
 
 # ============================================================================
 # CONFIGURATION NOTES
@@ -115,8 +141,16 @@ DEFAULT_BASE_BRANCH = "qa2"  # Change to None to use default branch, or "qa2" to
 # - Nested key: "config.database.host"
 # - Array access: "jobs.build.steps[0].uses"
 #
+# Debug and clone directory:
+# - DEBUG: True = keep clones in CLONE_DIR after run; False = delete all cloned repos after run.
+# - CLONE_DIR: Path to store clones (e.g. "bulk_pr_clones"); set to None to use a temp dir when not debugging.
+# - CLEANUP_CLONE_DIR: Legacy; cleanup is driven by DEBUG (and --cleanup / --no-debug).
+#
 # All values can be overridden via command-line arguments:
 # - --repos-file: Use a file instead of REPOS from config.py (optional)
+# - --clone-dir: Override clone directory
+# - --debug / --no-debug: Override DEBUG (keep or delete clones after run)
+# - --cleanup: Force delete clone directory after run
 # - --commit-message: Override commit message
 # - --pr-title: Override PR title
 # - --pr-body: Override PR body

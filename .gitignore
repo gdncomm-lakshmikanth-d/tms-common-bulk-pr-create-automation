@@ -23,3 +23,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# Clone directory (kept for debugging; delete manually when done)
+bulk_pr_clones/

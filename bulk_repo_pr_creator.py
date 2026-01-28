@@ -36,6 +36,9 @@ try:
         DEFAULT_BASE_BRANCH,
         REPOS
     )
+    CLONE_DIR = getattr(__import__("config"), "CLONE_DIR", None)
+    CLEANUP_CLONE_DIR = getattr(__import__("config"), "CLEANUP_CLONE_DIR", False)
+    DEBUG = getattr(__import__("config"), "DEBUG", True)
 except ImportError:
     # Setup basic logging for error message
     logging.basicConfig(
@@ -279,6 +282,170 @@ def apply_json_changes(file_path: Path, changes: List[Dict]) -> bool:
     return False
 
 
+def _yaml_values_equal(a: Any, b: Any) -> bool:
+    """Compare two YAML-loaded values for equality (dict key order independent)."""
+    try:
+        # Round-trip through YAML to normalize (handles key order, type coercion)
+        a_str = yaml.dump(a, sort_keys=True, default_flow_style=False)
+        b_str = yaml.dump(b, sort_keys=True, default_flow_style=False)
+        # Also try loading back in case of type differences (e.g. str vs int)
+        try:
+            a_norm = yaml.safe_load(a_str)
+            b_norm = yaml.safe_load(b_str)
+            return yaml.dump(a_norm, sort_keys=True) == yaml.dump(b_norm, sort_keys=True)
+        except Exception:
+            pass
+        return a_str.strip() == b_str.strip()
+    except Exception:
+        return a == b
+
+
+def _yaml_value_contains(current_val: Any, expected_pattern: Any) -> bool:
+    """
+    Check if current YAML value contains the expected pattern (partial matching).
+    
+    Supports:
+    - For tolerations: Check if list contains an item with specific key (e.g., {"key": "role"})
+    - For affinity: Check if dict contains a specific key (e.g., {"nodeAffinity": ...})
+    
+    Args:
+        current_val: The current value from YAML
+        expected_pattern: The pattern to match against
+    
+    Returns:
+        True if pattern is found, False otherwise
+    """
+    try:
+        # Case 1: Check if tolerations list contains an item with key "role"
+        # Pattern: [{"key": "role"}] or [{"key": "role", ...}]
+        if isinstance(expected_pattern, list) and len(expected_pattern) == 1:
+            pattern_item = expected_pattern[0]
+            if isinstance(pattern_item, dict) and "key" in pattern_item:
+                # Check if current_val is a list and contains an item with matching key
+                if isinstance(current_val, list):
+                    for item in current_val:
+                        if isinstance(item, dict) and item.get("key") == pattern_item.get("key"):
+                            return True
+                    return False
+        
+        # Case 2: Check if affinity dict contains nodeAffinity key
+        # Pattern: {"nodeAffinity": ...}
+        if isinstance(expected_pattern, dict) and "nodeAffinity" in expected_pattern:
+            if isinstance(current_val, dict):
+                return "nodeAffinity" in current_val
+        
+        # Default: fall back to exact match
+        return _yaml_values_equal(current_val, expected_pattern)
+    except Exception:
+        return False
+
+
+def delete_yaml_key_preserve_formatting(file_path: Path, key_name: str, expected_value: Optional[Any] = None) -> bool:
+    """
+    Delete a top-level YAML key using text-based approach to preserve file formatting.
+    
+    Args:
+        file_path: Path to the YAML file
+        key_name: Name of the top-level key to delete
+        expected_value: If set, only delete if value matches exactly
+    
+    Returns:
+        True if key was deleted, False otherwise
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except (IOError, OSError) as e:
+        logger.warning(f"Failed to read {file_path}: {e}")
+        return False
+    
+    # Check if key exists (allow leading whitespace so we match nested keys like "  tolerations:")
+    key_pattern = rf'^\s*{re.escape(key_name)}\s*:'
+    if not re.search(key_pattern, content, re.MULTILINE):
+        return False  # Key doesn't exist
+    
+    # If expected_value is provided, verify structure matches (only when key is top-level)
+    if expected_value is not None:
+        try:
+            data = yaml.safe_load(content) or {}
+            if key_name in data:
+                current_val = data[key_name]
+                if not _yaml_value_contains(current_val, expected_value):
+                    logger.info(
+                        f"Key '{key_name}' in {file_path.name}: value does not contain expected pattern, skipping delete"
+                    )
+                    return False
+            # If key not in data (e.g. nested), still proceed with text-based delete
+        except Exception as e:
+            logger.debug(f"Value check for '{key_name}' failed: {e}, attempting text delete")
+    
+    # Find the key and its value block using text-based approach
+    lines = content.split('\n')
+    result_lines = []
+    i = 0
+    deleted = False
+    
+    while i < len(lines):
+        line = lines[i]
+        
+        # Check if this line starts the key we want to delete (at start of line or with leading whitespace)
+        # Match: optional whitespace, key name, colon, optional whitespace, optional value
+        key_match = re.match(rf'^(\s*){re.escape(key_name)}\s*:(.*)$', line)
+        if key_match:
+            indent = len(key_match.group(1))
+            rest_of_line = key_match.group(2).strip()
+            
+            # This is the key to delete - skip it and its value
+            deleted = True
+            
+            # Check if it's an inline value (has content after colon on same line)
+            if rest_of_line and not rest_of_line.startswith('#'):
+                # Inline value: key: value (skip just this line)
+                i += 1
+                continue
+            
+            # Block value: key: followed by indented content on next lines
+            i += 1
+            
+            # Skip all lines that are more indented than the key
+            # This handles nested structures like arrays and objects
+            while i < len(lines):
+                next_line = lines[i]
+                
+                # Empty lines - include them in the block to delete
+                if not next_line.strip():
+                    i += 1
+                    continue
+                
+                # Calculate indentation of next line
+                next_indent = len(next_line) - len(next_line.lstrip())
+                
+                # If next line is at same or less indentation, we've reached the end of this block
+                if next_indent <= indent:
+                    break
+                
+                i += 1
+            continue
+        
+        result_lines.append(line)
+        i += 1
+    
+    if deleted:
+        # Write back with preserved formatting
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(result_lines))
+                # Preserve trailing newline if original had it
+                if content.endswith('\n'):
+                    f.write('\n')
+            return True
+        except (IOError, OSError) as e:
+            logger.warning(f"Failed to write {file_path}: {e}")
+            return False
+    
+    return False
+
+
 def apply_yaml_changes(file_path: Path, changes: List[Dict]) -> bool:
     """
     Apply YAML modifications to a file.
@@ -293,8 +460,39 @@ def apply_yaml_changes(file_path: Path, changes: List[Dict]) -> bool:
     if not file_path.exists():
         return False
     
+    # Check if we only have delete_key actions for top-level keys
+    # If so, use text-based deletion to preserve formatting
+    only_top_level_deletes = True
+    has_updates = False
+    
+    for change in changes:
+        if change.get("action") == "delete_key":
+            path = change.get("path", "")
+            # Check if it's a top-level key (no dots, no array notation)
+            if '.' in path or '[' in path:
+                only_top_level_deletes = False
+                break
+        elif change.get("action") == "update_key":
+            has_updates = True
+            only_top_level_deletes = False
+            break
+    
+    # If only top-level deletes, use text-based approach to preserve formatting
+    if only_top_level_deletes and not has_updates:
+        any_deleted = False
+        for change in changes:
+            if change.get("action") == "delete_key":
+                key_name = change.get("path", "")
+                expected_value = change.get("value")
+                if delete_yaml_key_preserve_formatting(file_path, key_name, expected_value):
+                    any_deleted = True
+        return any_deleted
+    
+    # Otherwise, use structured approach (for updates or nested deletes)
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
+            original_content = f.read()
+            f.seek(0)
             data = yaml.safe_load(f) or {}
     except (yaml.YAMLError, IOError, OSError) as e:
         logger.warning(f"Failed to read or parse YAML in {file_path}: {e}")
@@ -343,13 +541,78 @@ def apply_yaml_changes(file_path: Path, changes: List[Dict]) -> bool:
                             current[final_key] = value
                         else:
                             current.append(value)
+        elif change.get("action") == "delete_key":
+            path = change.get("path", "")
+            expected_value = change.get("value")  # If set, only delete when value matches exactly
+            
+            if path:
+                # Handle array notation
+                parts = re.split(r'\[(\d+)\]', path)
+                keys = []
+                for i, part in enumerate(parts):
+                    if i % 2 == 0:
+                        keys.extend(part.split('.'))
+                    else:
+                        keys.append(int(part))
+                
+                keys = [k for k in keys if k]  # Remove empty strings
+                
+                current = data
+                # Navigate to the parent
+                for key in keys[:-1]:
+                    if isinstance(current, dict):
+                        if key not in current:
+                            # Key path doesn't exist, nothing to delete
+                            break
+                        current = current[key]
+                    elif isinstance(current, list) and isinstance(key, int):
+                        if key >= len(current):
+                            # Index doesn't exist, nothing to delete
+                            break
+                        current = current[key]
+                    else:
+                        break
+                else:
+                    # Delete the final key (optionally only if value matches or contains pattern)
+                    final_key = keys[-1]
+                    if isinstance(current, dict) and final_key in current:
+                        if expected_value is not None:
+                            # Only delete if current value contains expected pattern (partial matching)
+                            current_val = current[final_key]
+                            if _yaml_value_contains(current_val, expected_value):
+                                del current[final_key]
+                        else:
+                            del current[final_key]
+                    elif isinstance(current, list) and isinstance(final_key, int) and final_key < len(current):
+                        if expected_value is not None:
+                            current_val = current[final_key]
+                            if _yaml_value_contains(current_val, expected_value):
+                                del current[final_key]
+                        else:
+                            del current[final_key]
     
     new_data = yaml.dump(data, sort_keys=True)
     if new_data != original_data:
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-            return True
+            # Try to preserve original formatting by using ruamel.yaml if available
+            # Otherwise fall back to PyYAML but try to match original indentation
+            try:
+                from ruamel.yaml import YAML as ruamel_yaml
+                y = ruamel_yaml()
+                y.preserve_quotes = True
+                y.width = 4096  # Prevent line wrapping
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    yaml_data = y.load(f)
+                # Apply changes to ruamel data structure
+                # (This is a simplified version - full implementation would need to replicate the logic)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    y.dump(data, f)
+                return True
+            except ImportError:
+                # Fall back to PyYAML with best-effort formatting
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=4096)
+                return True
         except (IOError, OSError) as e:
             logger.warning(f"Failed to write YAML to {file_path}: {e}")
             return False
@@ -509,13 +772,47 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
     Args:
         repo_path: Path to the repository
         branch_name: Name of the branch to create
-        dry_run: If True, skip actual branch creation
+        dry_run: If True, check but don't actually create/checkout
     
     Returns:
         True if successful
     """
     if dry_run:
-        logger.info(f"[DRY RUN] Would create branch {branch_name}")
+        # In dry-run, check if branch exists to give accurate message
+        # But only if repo directory exists (might not be cloned in dry-run)
+        if repo_path.exists() and (repo_path / ".git").exists():
+            try:
+                # Check if branch exists locally (read-only check)
+                exit_code, _, _ = run_command(
+                    ["git", "rev-parse", "--verify", branch_name],
+                    cwd=str(repo_path),
+                    check=False,
+                    capture_output=True,
+                    dry_run=False  # Execute this check even in dry-run
+                )
+                if exit_code == 0:
+                    logger.info(f"[DRY RUN] Branch {branch_name} already exists locally, would checkout")
+                    return True
+                
+                # Check if branch exists remotely (read-only check; ls-remote returns 0 with empty output when ref missing)
+                _, stdout_remote, _ = run_command(
+                    ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
+                    cwd=str(repo_path),
+                    check=False,
+                    capture_output=True,
+                    dry_run=False  # Execute this check even in dry-run
+                )
+                if stdout_remote.strip():
+                    logger.info(f"[DRY RUN] Branch {branch_name} exists remotely, would checkout and track")
+                    return True
+                
+                logger.info(f"[DRY RUN] Would create new branch {branch_name}")
+            except Exception:
+                # If we can't check, just show generic message
+                logger.info(f"[DRY RUN] Would check/create branch {branch_name}")
+        else:
+            # Repo not cloned yet in dry-run, show generic message
+            logger.info(f"[DRY RUN] Would check/create branch {branch_name}")
         return True
     
     try:
@@ -577,15 +874,16 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
             logger.info(f"Branch {branch_name} already exists locally, checking out...")
             run_command(["git", "checkout", branch_name], cwd=str(repo_path), check=True)
         else:
-            # Check if branch exists remotely
-            exit_code_remote, _, _ = run_command(
-                ["git", "ls-remote", "--heads", "origin", branch_name],
+            # Check if branch exists remotely (ls-remote returns 0 with empty output when ref missing)
+            _, stdout_remote, _ = run_command(
+                ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
                 cwd=str(repo_path),
                 check=False,
                 capture_output=True
             )
-            
-            if exit_code_remote == 0:
+            remote_branch_exists = bool(stdout_remote.strip())
+
+            if remote_branch_exists:
                 logger.info(f"Branch {branch_name} exists remotely, checking out and tracking...")
                 run_command(
                     ["git", "checkout", "-b", branch_name, f"origin/{branch_name}"],
@@ -593,7 +891,7 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
                     check=True
                 )
             else:
-                logger.info(f"Creating new branch {branch_name}...")
+                logger.info(f"Branch {branch_name} does not exist remotely, creating from {default_branch}...")
                 run_command(["git", "checkout", "-b", branch_name], cwd=str(repo_path), check=True)
         
         return True
@@ -676,7 +974,59 @@ def push_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> boo
         return False
 
 
-def create_pull_request(repo: str, branch_name: str, title: str, body: str, base_branch: Optional[str] = None, dry_run: bool = False) -> Optional[str]:
+def check_existing_pr(repo: str, branch_name: str, base_branch: Optional[str] = None, dry_run: bool = False) -> Optional[str]:
+    """
+    Check if an open PR exists for the given branch (head) and base branch.
+    
+    Args:
+        repo: Repository identifier (owner/repo)
+        branch_name: Head branch name (BRANCH_NAME)
+        base_branch: Base branch to match (DEFAULT_BASE_BRANCH)
+        dry_run: If True, still check but log as [DRY RUN]
+    
+    Returns:
+        PR URL if exists with matching head and base branch, None otherwise
+    """
+    # Note: We still check in dry-run mode to show existing PRs in summary
+    # PR checking is read-only, so we execute it even in dry-run mode
+    
+    try:
+        # Check for open PRs with this branch as head
+        cmd_check = [
+            "gh", "pr", "list",
+            "--repo", repo,
+            "--head", branch_name,
+            "--state", "open",
+            "--json", "url,baseRefName"
+        ]
+        if dry_run:
+            logger.debug(f"[DRY RUN] Checking for existing PR (read-only check): {' '.join(cmd_check)}")
+        # Execute even in dry-run mode since it's a read-only operation
+        exit_code, stdout, _ = run_command(cmd_check, check=False, capture_output=True, dry_run=False)
+        
+        if exit_code == 0 and stdout.strip():
+            try:
+                pr_list = json.loads(stdout)
+                if pr_list and len(pr_list) > 0:
+                    # Filter by base branch if specified
+                    if base_branch:
+                        for pr in pr_list:
+                            if pr.get("baseRefName") == base_branch:
+                                return pr.get("url", "")
+                        # No PR found with matching base branch
+                        return None
+                    else:
+                        # No base branch specified, return first open PR
+                        return pr_list[0].get("url", "")
+            except json.JSONDecodeError:
+                pass
+    except Exception as e:
+        logger.debug(f"Error checking for existing PR: {e}")
+    
+    return None
+
+
+def create_pull_request(repo: str, branch_name: str, title: str, body: str, base_branch: Optional[str] = None, dry_run: bool = False, update_existing: bool = False) -> Tuple[Optional[str], bool]:
     """
     Create a pull request using GitHub CLI.
     
@@ -687,34 +1037,27 @@ def create_pull_request(repo: str, branch_name: str, title: str, body: str, base
         body: PR body
         base_branch: Base branch for the PR (None means use default branch)
         dry_run: If True, skip actual PR creation
+        update_existing: If True, allow updating existing PR branch
     
     Returns:
-        PR URL if successful, None otherwise
+        Tuple of (PR URL if successful/existing, is_existing_pr)
     """
     if dry_run:
         logger.info(f"[DRY RUN] Would create PR for {repo}")
         return None
     
     try:
-        # Check if PR already exists for this branch
-        cmd_check = [
-            "gh", "pr", "list",
-            "--repo", repo,
-            "--head", branch_name,
-            "--json", "url",
-            "--limit", "1"
-        ]
-        exit_code, stdout, _ = run_command(cmd_check, check=False, capture_output=True)
+        # Check if PR already exists for this branch and base branch
+        existing_pr_url = check_existing_pr(repo, branch_name, base_branch, dry_run)
         
-        if exit_code == 0 and stdout.strip():
-            try:
-                pr_list = json.loads(stdout)
-                if pr_list and len(pr_list) > 0:
-                    pr_url = pr_list[0].get("url", "")
-                    logger.info(f"PR already exists for {repo} branch {branch_name}: {pr_url}")
-                    return pr_url
-            except json.JSONDecodeError:
-                pass  # Continue to create new PR
+        if existing_pr_url:
+            if update_existing:
+                logger.info(f"PR already exists for {repo} branch {branch_name}: {existing_pr_url}")
+                logger.info("Returning existing PR URL (new commits will be added to this branch)")
+                return existing_pr_url, True
+            else:
+                # This shouldn't happen if called correctly, but handle it
+                return existing_pr_url, True
         
         logger.info(f"Creating pull request for {repo}...")
         cmd = [
@@ -729,10 +1072,10 @@ def create_pull_request(repo: str, branch_name: str, title: str, body: str, base
         _, stdout, _ = run_command(cmd, check=True, capture_output=True)
         pr_url = stdout.strip()
         logger.info(f"Successfully created PR for {repo}: {pr_url}")
-        return pr_url
+        return pr_url, False
     except Exception as e:
         logger.error(f"Failed to create PR for {repo}: {e}")
-        return None
+        return None, False
 
 
 # ============================================================================
@@ -748,6 +1091,7 @@ def process_repository(
     branch_name: str,
     clone_dir: Path,
     base_branch: Optional[str] = None,
+    update_existing_pr: bool = False,
     dry_run: bool = False
 ) -> Dict[str, Any]:
     """
@@ -780,6 +1124,11 @@ def process_repository(
             result["error"] = "Failed to create branch"
             return result
         
+        # Check if PR already exists (check before applying changes so we can show it even if no changes)
+        existing_pr_url = check_existing_pr(repo, branch_name, base_branch, dry_run)
+        if existing_pr_url:
+            result["pr_url"] = existing_pr_url
+        
         # Apply file changes
         changes_made, modified_files = apply_file_changes(repo_path, rules)
         result["modified_files"] = modified_files
@@ -787,11 +1136,33 @@ def process_repository(
         if not changes_made:
             result["status"] = "skipped"
             result["skipped"] = True
-            result["skipped_reason"] = "No changes were made"
-            logger.info(f"Skipping {repo}: no changes made")
+            if existing_pr_url:
+                result["skipped_reason"] = "No changes were made (PR already exists)"
+                logger.info(f"Skipping {repo}: no changes made (existing PR: {existing_pr_url})")
+            else:
+                result["skipped_reason"] = "No changes were made"
+                logger.info(f"Skipping {repo}: no changes made")
             return result
         
-        # Commit changes
+        # Re-check PR in case it was created between initial check and now
+        if not existing_pr_url:
+            existing_pr_url = check_existing_pr(repo, branch_name, base_branch, dry_run)
+            if existing_pr_url:
+                result["pr_url"] = existing_pr_url
+        
+        # If PR exists and we're not updating, skip (don't commit)
+        if existing_pr_url and not update_existing_pr:
+            result["status"] = "skipped"
+            result["skipped"] = True
+            result["skipped_reason"] = "PR already exists (use --update-existing-pr to commit to existing branch)"
+            result["pr_url"] = existing_pr_url
+            logger.info(f"Skipping {repo}: PR already exists at {existing_pr_url}")
+            logger.info(f"  → To commit these changes to the existing PR, run with: --update-existing-pr")
+            return result
+        
+        # Commit changes (to new branch or existing PR branch)
+        if existing_pr_url and update_existing_pr:
+            logger.info(f"Committing to existing PR: {existing_pr_url}")
         if not commit_changes(repo_path, commit_message, dry_run):
             result["status"] = "skipped"
             result["skipped"] = True
@@ -804,15 +1175,22 @@ def process_repository(
             result["error"] = "Failed to push branch"
             return result
         
-        # Create PR
-        pr_url = create_pull_request(repo, branch_name, pr_title, pr_body, base_branch, dry_run)
+        # Create PR (or return existing if updating)
+        pr_url, is_existing = create_pull_request(
+            repo, branch_name, pr_title, pr_body, base_branch, dry_run, update_existing_pr
+        )
+        
         if not pr_url:
             result["status"] = "failed"
             result["error"] = "Failed to create pull request"
             return result
         
         result["pr_url"] = pr_url
-        result["status"] = "success"
+        if is_existing:
+            result["status"] = "success"
+            logger.info(f"Updated existing PR branch: {pr_url}")
+        else:
+            result["status"] = "success"
         return result
         
     except Exception as e:
@@ -869,12 +1247,35 @@ def main():
     )
     parser.add_argument(
         "--clone-dir",
-        help="Directory to clone repositories (default: temporary directory)"
+        help="Directory to clone repositories (default: CLONE_DIR from config or temporary directory)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        dest="debug",
+        default=DEBUG,
+        help="Keep cloned repos after run (override config DEBUG)"
+    )
+    parser.add_argument(
+        "--no-debug",
+        action="store_false",
+        dest="debug",
+        help="Delete all cloned repos after run (override config DEBUG)"
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Force delete clone directory after run"
     )
     parser.add_argument(
         "--base-branch",
         default=DEFAULT_BASE_BRANCH,
         help=f"Base branch for PRs (default: {DEFAULT_BASE_BRANCH or 'default branch'})"
+    )
+    parser.add_argument(
+        "--update-existing-pr",
+        action="store_true",
+        help="If PR already exists, commit to the existing branch instead of skipping"
     )
     
     args = parser.parse_args()
@@ -913,15 +1314,26 @@ def main():
     
     logger.info(f"Found {len(repos)} repositories to process")
     
-    # Setup clone directory
+    # Debug: if True keep clones, if False delete after run (--debug / --no-debug override config)
+    debug = args.debug
+    if debug:
+        logger.info("Debug mode: clones will be kept after run")
+    else:
+        logger.info("Debug off: clone directory will be deleted after run")
+
+    # Setup clone directory; when debug is False, delete all clones after run
     if args.clone_dir:
         clone_dir = Path(args.clone_dir)
         clone_dir.mkdir(parents=True, exist_ok=True)
-        cleanup_clone_dir = False
+        logger.info(f"Using clone directory: {clone_dir}")
+    elif CLONE_DIR or debug:
+        clone_dir = Path(CLONE_DIR if CLONE_DIR else "bulk_pr_clones")
+        clone_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using clone directory from config: {clone_dir}")
     else:
         clone_dir = Path(tempfile.mkdtemp(prefix="bulk_pr_creator_"))
-        cleanup_clone_dir = True
         logger.info(f"Using temporary clone directory: {clone_dir}")
+    cleanup_clone_dir = args.cleanup or (not debug)
     
     # Process repositories
     results = []
@@ -942,6 +1354,7 @@ def main():
             branch_name=args.branch,
             clone_dir=clone_dir,
             base_branch=args.base_branch,
+            update_existing_pr=args.update_existing_pr,
             dry_run=args.dry_run
         )
         
@@ -986,10 +1399,24 @@ def main():
                     logger.info(f"    Modified files: {', '.join(result['modified_files'])}")
     
     if summary['skipped'] > 0:
-        logger.info("Skipped repositories:")
-        for result in results:
-            if result["status"] == "skipped":
-                logger.info(f"  - {result['repo']}: {result.get('skipped_reason', 'Unknown')}")
+        # Separate skipped repos with existing PRs from others
+        skipped_with_prs = [r for r in results if r["status"] == "skipped" and r.get("pr_url")]
+        skipped_others = [r for r in results if r["status"] == "skipped" and not r.get("pr_url")]
+        
+        if skipped_with_prs:
+            logger.info("Skipped repositories (PR already exists):")
+            for result in skipped_with_prs:
+                repo_name = result['repo']
+                pr_url = result.get("pr_url")
+                logger.info(f"  - {repo_name}")
+                logger.info(f"    Existing PR: {pr_url}")
+        
+        if skipped_others:
+            logger.info("Skipped repositories:")
+            for result in skipped_others:
+                repo_name = result['repo']
+                skipped_reason = result.get('skipped_reason', 'Unknown')
+                logger.info(f"  - {repo_name}: {skipped_reason}")
     
     if summary['failed'] > 0:
         logger.info("Failed repositories:")
@@ -997,9 +1424,9 @@ def main():
             if result["status"] == "failed":
                 logger.error(f"  - {result['repo']}: {result.get('error', 'Unknown error')}")
     
-    # Cleanup
+    # Cleanup: delete clone directory when debug is False or --cleanup
     if cleanup_clone_dir and not args.dry_run:
-        logger.info(f"Cleaning up temporary directory: {clone_dir}")
+        logger.info(f"Cleaning up clone directory: {clone_dir}")
         shutil.rmtree(clone_dir, ignore_errors=True)
     
     # Exit with error code if any failures

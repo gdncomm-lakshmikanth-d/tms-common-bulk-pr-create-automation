@@ -69,6 +69,16 @@ gh auth status
 
 ### 3. Install Python Dependencies
 
+Using a virtual environment (recommended):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Or with an existing venv:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -281,8 +291,21 @@ Override any configuration via command-line arguments:
 - `--pr-body`: Override PR body
 - `--branch`: Override branch name
 - `--base-branch`: Override base branch
+- `--update-existing-pr`: If PR already exists, commit to the existing branch instead of skipping
 - `--verbose`: Enable verbose logging
-- `--clone-dir`: Directory to clone repositories (default: temporary directory)
+- `--clone-dir`: Directory to clone repositories (default: from config or `bulk_pr_clones`)
+- `--debug`: Keep cloned repos after run (override config)
+- `--no-debug`: Delete all cloned repos after run (override config)
+- `--cleanup`: Force delete clone directory after run
+
+### Debug option (config and CLI)
+
+In `config.py`, set **`DEBUG = True`** to keep cloned repos in `CLONE_DIR` for inspection after each run. Set **`DEBUG = False`** to delete all cloned repos after the run.
+
+- **DEBUG = True** (default): Clones are kept in `bulk_pr_clones/` for debugging.
+- **DEBUG = False**: Clone directory is removed after the run.
+
+Override from the command line: use **`--no-debug`** to delete clones after this run, or **`--debug`** to keep them.
 
 ### Examples
 
@@ -305,6 +328,18 @@ Override any configuration via command-line arguments:
 ```bash
 ./bulk_repo_pr_creator.py --verbose
 ```
+
+**Update Existing PR (commit to existing branch):**
+If a PR already exists and you have new changes to push, you **must** use `--update-existing-pr`; otherwise the script skips and does not commit:
+```bash
+./bulk_repo_pr_creator.py --update-existing-pr
+```
+Without this flag, the script will apply changes locally but skip commit/push when it finds an existing PR.
+
+**Note:** If multiple open PRs exist for the same branch (rare but possible), the script will:
+- Use the most recent open PR
+- Log a warning about multiple PRs found
+- Commit to that branch (which will update all PRs using that branch)
 
 ## How It Works
 
@@ -351,10 +386,13 @@ Successful repositories:
 The script is designed to be resilient:
 
 - **Missing files**: If a target file doesn't exist, the rule is skipped for that repository
-- **No changes**: If no changes are made, the commit and PR creation are skipped
+- **No changes**: If no changes are made, the commit and PR creation are skipped (no unnecessary commits)
 - **Individual failures**: If one repository fails, processing continues with others
 - **Comprehensive logging**: All operations are logged with clear error messages
-- **Duplicate PRs**: Checks if PR already exists before creating a new one
+- **Existing PRs**: 
+  - By default: If PR already exists (checks for open PRs only), the repository is skipped
+  - With `--update-existing-pr`: If PR exists, new commits are added to the existing branch
+  - **Multiple PRs**: If multiple open PRs exist for the same branch, uses the most recent one and logs a warning
 
 ## Troubleshooting
 
@@ -396,6 +434,13 @@ gh repo view owner/repo
 ### No Changes Detected
 
 If the target file already has the expected values, the script will skip the commit. This is expected behavior.
+
+### Using --update-existing-pr but Still No Commit
+
+If one repo has changes to apply but the script skips without committing:
+
+1. **Value match for delete_key**: When deleting YAML keys with an expected `value`, the current file value must match. If you see "value does not match expected config, skipping delete", the file content differs (e.g. extra keys, different formatting). Either align the file with the expected config, or remove the `"value"` from that rule in `config.py` to delete the key whenever it exists (no value check).
+2. **Run with --verbose**: Use `./bulk_repo_pr_creator.py --update-existing-pr --verbose` to see why a key was or wasn’t deleted.
 
 ### Branch Already Exists
 
