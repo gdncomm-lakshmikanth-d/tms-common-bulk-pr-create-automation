@@ -25,69 +25,27 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import yaml
 
-
-# ============================================================================
-# CONFIGURATION SECTION
-# ============================================================================
-
-# Define your change rules here
-# Each rule specifies what file to modify and how to modify it
-CHANGE_RULES = [
-    {
-        "file": "Jenkinsfile",
-        "type": "text",
-        "changes": [
-            {
-                "action": "replace",
-                "pattern": r"@Library\('gcp-jenkins-library@2\.2\.5'\)",
-                "replacement": "@Library('gcp-jenkins-library@2.2.6')"
-            }
-        ]
-    }
-    # Example: To modify deployment/qa2/values.yaml, add a rule like this:
-    # {
-    #     "file": "deployment/qa2/values.yaml",
-    #     "type": "yaml",
-    #     "changes": [
-    #         {
-    #             "action": "update_key",
-    #             "path": "image.tag",  # Example: update image tag
-    #             "value": "v1.2.3"
-    #         },
-    #         {
-    #             "action": "update_key",
-    #             "path": "replicaCount",  # Example: update replica count
-    #             "value": 3
-    #         }
-    #     ]
-    # },
-    # Or for text replacement in YAML:
-    # {
-    #     "file": "deployment/qa2/values.yaml",
-    #     "type": "text",
-    #     "changes": [
-    #         {
-    #             "action": "replace",
-    #             "pattern": r"image:\s+myapp:v1\.0\.0",
-    #             "replacement": "image: myapp:v1.0.1"
-    #         }
-    #     ]
-    # }
-]
-
-# Default commit message
-DEFAULT_COMMIT_MESSAGE = "chore: update gcp-jenkins-library to 2.2.6"
-
-# PR title and body
-DEFAULT_PR_TITLE = "Update gcp-jenkins-library to 2.2.6"
-DEFAULT_PR_BODY = "Automated update of gcp-jenkins-library from version 2.2.5 to 2.2.6 in Jenkinsfile."
-
-# Branch name
-BRANCH_NAME = "update-jenkins-library-2.2.6"
-
-# Base branch for PR (the branch the PR will be merged into)
-DEFAULT_BASE_BRANCH = None  # None means use default branch (main/master)
-# To target qa2 branch, set: DEFAULT_BASE_BRANCH = "qa2"
+# Import configuration from config.py
+try:
+    from config import (
+        CHANGE_RULES,
+        DEFAULT_COMMIT_MESSAGE,
+        DEFAULT_PR_TITLE,
+        DEFAULT_PR_BODY,
+        BRANCH_NAME,
+        DEFAULT_BASE_BRANCH,
+        REPOS
+    )
+except ImportError:
+    # Setup basic logging for error message
+    logging.basicConfig(
+        level=logging.ERROR,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    logger.error("Configuration file 'config.py' not found. Please create it based on config.py.example")
+    sys.exit(1)
 
 
 # ============================================================================
@@ -876,8 +834,8 @@ def main():
     )
     parser.add_argument(
         "--repos-file",
-        default="repos.txt",
-        help="Path to file containing repository list (default: repos.txt)"
+        default=None,
+        help="Path to file containing repository list (default: use REPOS from config.py)"
     )
     parser.add_argument(
         "--dry-run",
@@ -930,10 +888,28 @@ def main():
         logger.info("=" * 60)
     
     # Read repositories
-    repos = read_repos_file(args.repos_file)
-    if not repos:
-        logger.error(f"No repositories found in {args.repos_file}")
-        sys.exit(1)
+    if args.repos_file:
+        # Use file if specified
+        repos = read_repos_file(args.repos_file)
+        if not repos:
+            logger.error(f"No repositories found in {args.repos_file}")
+            sys.exit(1)
+    else:
+        # Use REPOS from config.py
+        repos = []
+        for repo in REPOS:
+            # Normalize repo format (handles URLs and owner/repo format)
+            normalized = normalize_repo_name(repo)
+            if normalized and '/' in normalized:
+                repos.append(normalized)
+            else:
+                logger.warning(f"Invalid repository format in config.py: {repo}")
+        
+        if not repos:
+            logger.error("No valid repositories found in config.py REPOS list")
+            sys.exit(1)
+        
+        logger.info(f"Using {len(repos)} repositories from config.py")
     
     logger.info(f"Found {len(repos)} repositories to process")
     
