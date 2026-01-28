@@ -1,0 +1,3 @@
+# Repositories to update Jenkins library version
+gdncomm/nonprod-deployment-gdn-tms-api
+gdncomm/nonprod-deployment-gdn-tms-authentication
