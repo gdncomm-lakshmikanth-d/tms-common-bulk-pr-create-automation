@@ -91,22 +91,22 @@ CHANGE_RULES = [
 # Format: owner/repo (e.g., "gdncomm/nonprod-deployment-gdn-tms-api")
 # You can also use full GitHub URLs - they will be automatically normalized
 REPOS = [
-    "gdncomm/nonprod-deployment-gdn-osrm-backend",
-    "gdncomm/nonprod-deployment-gdn-tms-authentication",
-    "gdncomm/nonprod-deployment-gdn-tms-api",
-    "gdncomm/nonprod-deployment-gdn-tms-ui-main",
-    "gdncomm/nonprod-deployment-gdn-tms-shipment",
-    "gdncomm/nonprod-deployment-gdn-tms-control-center",
-    "gdncomm/nonprod-deployment-gdn-tms-hub-management",
-    "gdncomm/nonprod-deployment-gdn-tms-search"
+    # "gdncomm/nonprod-deployment-gdn-osrm-backend",
+    "gdncomm/nonprod-deployment-gdn-tms-search",
     "gdncomm/nonprod-deployment-gdn-tms-instant-trip",
     "gdncomm/nonprod-deployment-gdn-tms-external-gateway",
-    "gdncomm/nonprod-deployment-gdn-tms-gateway",
-    "gdncomm/nonprod-deployment-gdn-tms-engagement",
-    "gdncomm/nonprod-deployment-gdn-tms-user-management"
+    "gdncomm/nonprod-deployment-gdn-tms-user-management",
     "gdncomm/nonprod-deployment-gdn-tms-pricing",
-    "gdncomm/nonprod-deployment-gdn-tms-maps",
-    "gdncomm/nonprod-deployment-gdn-tms-bes-packet"
+    # "gdncomm/nonprod-deployment-gdn-tms-authentication",
+    # "gdncomm/nonprod-deployment-gdn-tms-api",
+    # "gdncomm/nonprod-deployment-gdn-tms-ui-main",
+    # "gdncomm/nonprod-deployment-gdn-tms-shipment",
+    # "gdncomm/nonprod-deployment-gdn-tms-control-center",
+    # "gdncomm/nonprod-deployment-gdn-tms-hub-management",
+    # "gdncomm/nonprod-deployment-gdn-tms-gateway",
+    # "gdncomm/nonprod-deployment-gdn-tms-engagement",
+    # "gdncomm/nonprod-deployment-gdn-tms-maps",
+    # "gdncomm/nonprod-deployment-gdn-tms-bes-packet"
 ]
 
 # ============================================================================

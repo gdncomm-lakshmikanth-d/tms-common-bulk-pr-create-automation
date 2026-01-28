@@ -789,13 +789,14 @@ def clone_repository(repo: str, clone_dir: Path, dry_run: bool = False) -> Optio
         return None
 
 
-def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> bool:
+def create_branch(repo_path: Path, branch_name: str, base_branch: Optional[str] = None, dry_run: bool = False) -> bool:
     """
     Create and checkout a new branch.
     
     Args:
         repo_path: Path to the repository
         branch_name: Name of the branch to create
+        base_branch: Branch to checkout and create from (e.g., "qa2", "preprod"). If None, uses default branch.
         dry_run: If True, check but don't actually create/checkout
     
     Returns:
@@ -852,27 +853,32 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
             capture_output=True
         )
         
-        default_branch = "main"
-        if stdout.strip():
-            default_branch = stdout.strip().split("/")[-1]
-        else:
-            # Fallback: try to determine default branch
-            _, stdout, _ = run_command(
-                ["git", "branch", "-r", "--format", "%(refname:short)"],
-                cwd=str(repo_path),
-                check=False,
-                capture_output=True
-            )
-            branches = [b.strip() for b in stdout.strip().split("\n") if b.strip()]
-            if "origin/main" in branches:
-                default_branch = "main"
-            elif "origin/master" in branches:
-                default_branch = "master"
+        # Determine which branch to checkout (base_branch if provided, otherwise default branch)
+        checkout_branch = base_branch
+        if not checkout_branch:
+            # Get default branch name
+            default_branch = "main"
+            if stdout.strip():
+                default_branch = stdout.strip().split("/")[-1]
+            else:
+                # Fallback: try to determine default branch
+                _, stdout, _ = run_command(
+                    ["git", "branch", "-r", "--format", "%(refname:short)"],
+                    cwd=str(repo_path),
+                    check=False,
+                    capture_output=True
+                )
+                branches = [b.strip() for b in stdout.strip().split("\n") if b.strip()]
+                if "origin/main" in branches:
+                    default_branch = "main"
+                elif "origin/master" in branches:
+                    default_branch = "master"
+            checkout_branch = default_branch
         
-        # Checkout default branch first
-        logger.debug(f"Checking out default branch: {default_branch}")
+        # Checkout the branch we'll create from (base_branch or default branch)
+        logger.info(f"Checking out branch: {checkout_branch}")
         run_command(
-            ["git", "checkout", default_branch],
+            ["git", "checkout", checkout_branch],
             cwd=str(repo_path),
             check=False,
             capture_output=True
@@ -880,7 +886,7 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
         
         # Pull latest changes
         run_command(
-            ["git", "pull", "origin", default_branch],
+            ["git", "pull", "origin", checkout_branch],
             cwd=str(repo_path),
             check=False,
             capture_output=True
@@ -895,28 +901,58 @@ def create_branch(repo_path: Path, branch_name: str, dry_run: bool = False) -> b
         )
         
         if exit_code == 0:
-            logger.info(f"Branch {branch_name} already exists locally, checking out...")
-            run_command(["git", "checkout", branch_name], cwd=str(repo_path), check=True)
-        else:
-            # Check if branch exists remotely (ls-remote returns 0 with empty output when ref missing)
-            _, stdout_remote, _ = run_command(
-                ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
+            # Branch exists locally - delete it and recreate from current base branch
+            # This ensures the branch is always based on the correct base branch
+            # First, make sure we're not on the branch we want to delete
+            _, current_branch, _ = run_command(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=str(repo_path),
                 check=False,
                 capture_output=True
             )
-            remote_branch_exists = bool(stdout_remote.strip())
+            if current_branch.strip() == branch_name:
+                # We're on the branch we want to delete - switch to base branch first
+                logger.info(f"Currently on {branch_name}, switching to {checkout_branch} before deletion...")
+                run_command(["git", "checkout", checkout_branch], cwd=str(repo_path), check=False, capture_output=True)
+            logger.info(f"Branch {branch_name} already exists locally, deleting and recreating from {checkout_branch}...")
+            run_command(["git", "branch", "-D", branch_name], cwd=str(repo_path), check=False, capture_output=True)
+        
+        # Check if branch exists remotely (ls-remote returns 0 with empty output when ref missing)
+        _, stdout_remote, _ = run_command(
+            ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"],
+            cwd=str(repo_path),
+            check=False,
+            capture_output=True
+        )
+        remote_branch_exists = bool(stdout_remote.strip())
 
-            if remote_branch_exists:
-                logger.info(f"Branch {branch_name} exists remotely, checking out and tracking...")
-                run_command(
-                    ["git", "checkout", "-b", branch_name, f"origin/{branch_name}"],
-                    cwd=str(repo_path),
-                    check=True
-                )
-            else:
-                logger.info(f"Branch {branch_name} does not exist remotely, creating from {default_branch}...")
-                run_command(["git", "checkout", "-b", branch_name], cwd=str(repo_path), check=True)
+        if remote_branch_exists:
+            # Branch exists remotely - create local branch tracking remote
+            logger.info(f"Branch {branch_name} exists remotely, creating local branch tracking remote...")
+            run_command(
+                ["git", "checkout", "-b", branch_name, f"origin/{branch_name}"],
+                cwd=str(repo_path),
+                check=True
+            )
+            # Reset to base branch to ensure we're working from the correct base
+            # This ensures changes are applied relative to the current base branch, not the old one
+            logger.info(f"Resetting branch {branch_name} to {checkout_branch} to ensure correct base...")
+            run_command(
+                ["git", "reset", "--hard", checkout_branch],
+                cwd=str(repo_path),
+                check=True
+            )
+            # Set upstream again after reset (reset might have removed tracking)
+            run_command(
+                ["git", "branch", "--set-upstream-to", f"origin/{branch_name}", branch_name],
+                cwd=str(repo_path),
+                check=False,
+                capture_output=True
+            )
+        else:
+            # Branch doesn't exist - create new branch from current base branch
+            logger.info(f"Branch {branch_name} does not exist remotely, creating from {checkout_branch}...")
+            run_command(["git", "checkout", "-b", branch_name], cwd=str(repo_path), check=True)
         
         return True
     except Exception as e:
@@ -1142,8 +1178,8 @@ def process_repository(
             result["error"] = "Failed to clone repository"
             return result
         
-        # Create branch
-        if not create_branch(repo_path, branch_name, dry_run):
+        # Create branch (from base_branch if specified, otherwise from default branch)
+        if not create_branch(repo_path, branch_name, base_branch, dry_run):
             result["status"] = "failed"
             result["error"] = "Failed to create branch"
             return result
