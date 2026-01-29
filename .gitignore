@@ -26,3 +26,6 @@ Thumbs.db
 
 # Clone directory (kept for debugging; delete manually when done)
 bulk_pr_clones/
+
+# Stash credentials (never commit!)
+stash_config.py

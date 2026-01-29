@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""
+Stash/Bitbucket Server Configuration
+
+Copy this file to stash_config.py and fill in your credentials.
+DO NOT commit stash_config.py to version control!
+"""
+
+# Stash/Bitbucket Server credentials
+STASH_USERNAME = "lakshmikanth.d"
+STASH_PASSWORD = ""
+
+# Optional: Override other settings
+# STASH_PROJECT = "PROD-FULLFILLMENT-TMS"
+# STASH_SOURCE_BRANCH = "enableDatadog"
+# STASH_TARGET_BRANCH = "master"

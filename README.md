@@ -32,25 +32,6 @@ A production-ready Python script that automates bulk Pull Request creation acros
 brew install gh
 ```
 
-#### Linux (Ubuntu/Debian)
-```bash
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-sudo apt update
-sudo apt install gh
-```
-
-#### Linux (Fedora/RHEL)
-```bash
-sudo dnf install 'dnf-command(config-manager)'
-sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
-sudo dnf install gh
-```
-
-#### Windows
-Download and install from: https://cli.github.com/
-
 ### 2. Authenticate GitHub CLI
 
 ```bash
@@ -87,13 +68,12 @@ pip install -r requirements.txt
 
 Edit `config.py` to customize:
 
-**Repositories:**
+**Repository source (default: org + team):**
 ```python
-REPOS = [
-    "owner1/repo1",
-    "owner2/repo2",
-]
+GITHUB_ORG = "gdncomm"
+GITHUB_TEAM = "TMS-DEPLOYMENT-NONPROD"
 ```
+With these set, running `./bulk_repo_pr_creator.py` with no arguments lists repos for that team in that org, then prompts you to select. Alternatively use `--repos-file path/to/repos.txt` to supply a list (one `owner/repo` per line).
 
 **Change Rules:**
 ```python
@@ -136,23 +116,31 @@ Or with verbose logging:
 ./bulk_repo_pr_creator.py --verbose
 ```
 
+**Step-by-step progress:** For each repo the script prints:
+1. **Clone** – cloning the repo  
+2. **Branch** – creating/checking out the branch  
+3. **Changes** – eligible or not; if eligible, applied files are listed  
+4. **Push** – pushing the branch  
+5. **PR** – creating or linking the pull request  
+
+Each step shows `✓` (done), `⊘` (skipped), or `✗` (failed).
+
 ## Configuration Guide
 
 All configuration is in `config.py`. Here's how to configure each section:
 
-### Repository List
+### Repository source (org + team)
 
-Add repositories to the `REPOS` list:
+Repos are listed from GitHub by org and optional team; no manual repo list in config.
 
+Set in `config.py`:
 ```python
-REPOS = [
-    "gdncomm/nonprod-deployment-gdn-tms-api",
-    "gdncomm/nonprod-deployment-gdn-tms-authentication",
-    # You can also use full URLs - they'll be normalized automatically
-    # "https://github.com/owner/repo",
-    # "git@github.com:owner/repo.git",
-]
+GITHUB_ORG = "gdncomm"
+GITHUB_TEAM = "TMS-DEPLOYMENT-NONPROD"
 ```
+Then run `./bulk_repo_pr_creator.py` with no arguments to list repos for that team in that org and select interactively.
+
+To use a file instead: `./bulk_repo_pr_creator.py --repos-file path/to/repos.txt` (one `owner/repo` per line).
 
 ### Change Rules
 
@@ -284,7 +272,10 @@ Override any configuration via command-line arguments:
 ```
 
 **Available Options:**
-- `--repos-file`: Use a file instead of REPOS from config.py (optional)
+- `--repos-file`: Path to file with repo list (one owner/repo per line). Use instead of org/team.
+- `--org ORG`: List all repos from GitHub org ORG and then select which to process (e.g., `--org gdncomm`)
+- `--team TEAM`: Filter by GitHub team — list only repos for this team (e.g., `--team TMS-DEPLOYMENT-NONPROD`). Requires `--org`. Use `--team` alone to use `GITHUB_TEAM` from config.
+- `--no-select`: Process all repos without selection prompt (for scripting)
 - `--dry-run`: Perform a dry run without making actual changes
 - `--commit-message`: Override commit message
 - `--pr-title`: Override PR title
@@ -306,6 +297,22 @@ In `config.py`, set **`DEBUG = True`** to keep cloned repos in `CLONE_DIR` for i
 - **DEBUG = False**: Clone directory is removed after the run.
 
 Override from the command line: use **`--no-debug`** to delete clones after this run, or **`--debug`** to keep them.
+
+### List and select repos (like Stash script)
+
+**Default (no arguments):** If `GITHUB_ORG` and `GITHUB_TEAM` are set in `config.py`, running `./bulk_repo_pr_creator.py` with no arguments will list repos for that org and team, then prompt you to select. So you can run the script with no flags and get org + team behavior.
+
+- **Default:** With `GITHUB_ORG` and `GITHUB_TEAM` in config, `./bulk_repo_pr_creator.py` lists repos for that team in that org, then you select.
+- **From file:** Use `--repos-file path/to/repos.txt` (one owner/repo per line) to list from a file, then select.
+- **Override org/team:** Run with `--org gdncomm` and/or `--team TMS-DEPLOYMENT-NONPROD` to override config. Use `--team` with no value to use `GITHUB_TEAM` from config.
+
+**Selection format:**
+- Numbers: `1,3,5` (repos 1, 3, 5)
+- Ranges: `1-5,10-15`
+- All: `all`
+- Abort: `none` or Enter
+
+Use **`--no-select`** to skip the prompt and process all repos (e.g., in CI).
 
 ### Examples
 
@@ -474,7 +481,8 @@ tms-common-bulk-pr-create-automation/
 All configuration is in `config.py`:
 
 - `CHANGE_RULES`: List of file modification rules
-- `REPOS`: List of repositories to process
+- `GITHUB_ORG`: Default GitHub org to list repos from
+- `GITHUB_TEAM`: Default team to filter repos (optional)
 - `DEFAULT_COMMIT_MESSAGE`: Default commit message
 - `DEFAULT_PR_TITLE`: Default PR title
 - `DEFAULT_PR_BODY`: Default PR body

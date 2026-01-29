@@ -84,30 +84,15 @@ CHANGE_RULES = [
 ]
 
 # ============================================================================
-# REPOSITORY LIST
+# REPOSITORY SOURCE (org + team)
 # ============================================================================
 
-# List of repositories to process
-# Format: owner/repo (e.g., "gdncomm/nonprod-deployment-gdn-tms-api")
-# You can also use full GitHub URLs - they will be automatically normalized
-REPOS = [
-    # "gdncomm/nonprod-deployment-gdn-osrm-backend",
-    "gdncomm/nonprod-deployment-gdn-tms-search",
-    "gdncomm/nonprod-deployment-gdn-tms-instant-trip",
-    "gdncomm/nonprod-deployment-gdn-tms-external-gateway",
-    "gdncomm/nonprod-deployment-gdn-tms-user-management",
-    "gdncomm/nonprod-deployment-gdn-tms-pricing",
-    # "gdncomm/nonprod-deployment-gdn-tms-authentication",
-    # "gdncomm/nonprod-deployment-gdn-tms-api",
-    # "gdncomm/nonprod-deployment-gdn-tms-ui-main",
-    # "gdncomm/nonprod-deployment-gdn-tms-shipment",
-    # "gdncomm/nonprod-deployment-gdn-tms-control-center",
-    # "gdncomm/nonprod-deployment-gdn-tms-hub-management",
-    # "gdncomm/nonprod-deployment-gdn-tms-gateway",
-    # "gdncomm/nonprod-deployment-gdn-tms-engagement",
-    # "gdncomm/nonprod-deployment-gdn-tms-maps",
-    # "gdncomm/nonprod-deployment-gdn-tms-bes-packet"
-]
+# Default: repos are listed from this GitHub org, filtered by team (see GITHUB_TEAM).
+# Run ./bulk_repo_pr_creator.py with no arguments to use these.
+GITHUB_ORG = "gdncomm"
+GITHUB_TEAM = "TMS-DEPLOYMENT-NONPROD"
+
+# To use a file instead: ./bulk_repo_pr_creator.py --repos-file path/to/repos.txt
 
 # ============================================================================
 # GIT & PR CONFIGURATION
@@ -162,7 +147,7 @@ CLEANUP_CLONE_DIR = False
 # - CLEANUP_CLONE_DIR: Legacy; cleanup is driven by DEBUG (and --cleanup / --no-debug).
 #
 # All values can be overridden via command-line arguments:
-# - --repos-file: Use a file instead of REPOS from config.py (optional)
+# - --repos-file: Use a file of repo names (one owner/repo per line) instead of org/team
 # - --clone-dir: Override clone directory
 # - --debug / --no-debug: Override DEBUG (keep or delete clones after run)
 # - --cleanup: Force delete clone directory after run

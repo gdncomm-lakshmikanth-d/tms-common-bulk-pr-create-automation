@@ -34,11 +34,12 @@ try:
         DEFAULT_PR_BODY,
         BRANCH_NAME,
         DEFAULT_BASE_BRANCH,
-        REPOS
     )
     CLONE_DIR = getattr(__import__("config"), "CLONE_DIR", None)
     CLEANUP_CLONE_DIR = getattr(__import__("config"), "CLEANUP_CLONE_DIR", False)
     DEBUG = getattr(__import__("config"), "DEBUG", True)
+    GITHUB_ORG = getattr(__import__("config"), "GITHUB_ORG", None)
+    GITHUB_TEAM = getattr(__import__("config"), "GITHUB_TEAM", None)
 except ImportError:
     # Setup basic logging for error message
     logging.basicConfig(
@@ -155,6 +156,140 @@ def read_repos_file(repos_file: str) -> List[str]:
         logger.error(f"Error reading repos file {repos_file}: {e}")
     
     return repos
+
+
+def _team_name_to_slug(team: str) -> str:
+    """Convert team name to GitHub API team slug (lowercase, spaces to hyphens)."""
+    slug = team.strip().lower().replace(" ", "-")
+    # Keep only alphanumeric and hyphens (GitHub slugs are typically like 'tms-deployment-nonprod')
+    slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    return slug or team.strip().lower().replace(" ", "-")
+
+
+def list_repos_from_github_team(org: str, team: str) -> List[str]:
+    """
+    List repositories for a GitHub organization team using GitHub API.
+    Uses: GET /orgs/{org}/teams/{team_slug}/repos
+    
+    Args:
+        org: GitHub organization name (e.g., "gdncomm")
+        team: Team name or slug (e.g., "TMS-DEPLOYMENT-NONPROD" or "tms-deployment-nonprod")
+    
+    Returns:
+        List of repository identifiers in owner/repo format
+    """
+    slug = _team_name_to_slug(team)
+    try:
+        # gh api orgs/ORG/teams/SLUG/repos --paginate
+        # With pagination we get multiple JSON arrays; -q '.[].full_name' gives one name per line per page
+        exit_code, stdout, stderr = run_command(
+            ["gh", "api", f"orgs/{org}/teams/{slug}/repos", "--paginate", "-q", ".[].full_name"],
+            check=False,
+            capture_output=True,
+            dry_run=False
+        )
+        if exit_code != 0:
+            logger.warning(f"Failed to list repos for team {team} (slug: {slug}): {stderr or stdout}")
+            return []
+        repos = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
+        return repos
+    except Exception as e:
+        logger.warning(f"Error listing repos for team {team}: {e}")
+        return []
+
+
+def list_repos_from_github_org(org: str) -> List[str]:
+    """
+    List repositories in a GitHub organization using gh CLI.
+    
+    Args:
+        org: GitHub organization name (e.g., "gdncomm")
+    
+    Returns:
+        List of repository identifiers in owner/repo format
+    """
+    try:
+        # gh repo list ORG --limit 1000 --json nameWithOwner -q '.[].nameWithOwner'
+        exit_code, stdout, stderr = run_command(
+            ["gh", "repo", "list", org, "--limit", "1000", "--json", "nameWithOwner", "-q", ".[].nameWithOwner"],
+            check=False,
+            capture_output=True,
+            dry_run=False
+        )
+        if exit_code != 0:
+            logger.warning(f"Failed to list repos from org {org}: {stderr or stdout}")
+            return []
+        repos = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
+        return repos
+    except Exception as e:
+        logger.warning(f"Error listing repos from org {org}: {e}")
+        return []
+
+
+def select_repos_interactive(repos: List[str]) -> List[str]:
+    """
+    Display repositories with numbers and let user select which to process.
+    
+    Args:
+        repos: Full list of repository identifiers (owner/repo)
+    
+    Returns:
+        List of selected repository identifiers
+    """
+    if not repos:
+        return []
+    
+    logger.info("")
+    logger.info("Repositories:")
+    for i, repo in enumerate(repos, 1):
+        logger.info(f"  {i:3d}. {repo}")
+    
+    print("")
+    print("Select repositories to process:")
+    print("  - Enter numbers separated by commas (e.g., 1,3,5)")
+    print("  - Enter ranges (e.g., 1-5,10-15)")
+    print("  - Enter 'all' to process all repositories")
+    print("  - Enter 'none' or press Enter to abort")
+    print("")
+    
+    try:
+        selection = input("Your selection: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("")
+        return []
+    
+    if not selection or selection.lower() in ["none", "n", ""]:
+        logger.info("Aborted.")
+        return []
+    
+    if selection.lower() == "all":
+        return repos
+    
+    # Parse selection (e.g., "1,3,5-10,15")
+    selected_indices = set()
+    for part in selection.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = map(int, part.split("-", 1))
+                selected_indices.update(range(start, end + 1))
+            except ValueError:
+                logger.warning(f"Invalid range: {part}")
+        else:
+            try:
+                selected_indices.add(int(part))
+            except ValueError:
+                logger.warning(f"Invalid number: {part}")
+    
+    selected = [repos[i - 1] for i in selected_indices if 1 <= i <= len(repos)]
+    if not selected:
+        logger.error("No valid repositories selected. Aborting.")
+        return []
+    
+    logger.info(f"Selected {len(selected)} repository/repositories:")
+    for repo in selected:
+        logger.info(f"  - {repo}")
+    return selected
 
 
 def normalize_repo_name(repo: str) -> str:
@@ -1139,6 +1274,15 @@ def create_pull_request(repo: str, branch_name: str, title: str, body: str, base
 
 
 # ============================================================================
+# STEP PROGRESS DISPLAY
+# ============================================================================
+
+def step_progress(step_num: int, total: int, label: str, status: str = "...") -> None:
+    """Print a single step progress line (e.g. '  [1/5] Clone ✓')."""
+    logger.info(f"  [{step_num}/{total}] {label} {status}")
+
+
+# ============================================================================
 # MAIN PROCESSING FUNCTION
 # ============================================================================
 
@@ -1170,39 +1314,54 @@ def process_repository(
         "pr_url": None
     }
     
+    TOTAL_STEPS = 5
+    repo_short = repo.split("/")[-1] if "/" in repo else repo
+    
     try:
-        # Clone repository
+        logger.info("")
+        logger.info(f"  ┌─ {repo_short}")
+        
+        # Step 1: Clone
+        step_progress(1, TOTAL_STEPS, "Clone", "...")
         repo_path = clone_repository(repo, clone_dir, dry_run)
         if not repo_path:
+            step_progress(1, TOTAL_STEPS, "Clone", "✗ failed")
             result["status"] = "failed"
             result["error"] = "Failed to clone repository"
             return result
+        step_progress(1, TOTAL_STEPS, "Clone", "✓")
         
-        # Create branch (from base_branch if specified, otherwise from default branch)
+        # Step 2: Branch
+        step_progress(2, TOTAL_STEPS, "Branch", "...")
         if not create_branch(repo_path, branch_name, base_branch, dry_run):
+            step_progress(2, TOTAL_STEPS, "Branch", "✗ failed")
             result["status"] = "failed"
             result["error"] = "Failed to create branch"
             return result
+        step_progress(2, TOTAL_STEPS, "Branch", "✓")
         
         # Check if PR already exists (check before applying changes so we can show it even if no changes)
         existing_pr_url = check_existing_pr(repo, branch_name, base_branch, dry_run)
         if existing_pr_url:
             result["pr_url"] = existing_pr_url
         
-        # Apply file changes
+        # Step 3: Changes (eligible or not, then apply if eligible)
+        step_progress(3, TOTAL_STEPS, "Changes", "...")
         changes_made, modified_files = apply_file_changes(repo_path, rules)
         result["modified_files"] = modified_files
         
         if not changes_made:
+            step_progress(3, TOTAL_STEPS, "Changes", "⊘ not eligible (no changes)")
             result["status"] = "skipped"
             result["skipped"] = True
             if existing_pr_url:
                 result["skipped_reason"] = "No changes were made (PR already exists)"
-                logger.info(f"Skipping {repo}: no changes made (existing PR: {existing_pr_url})")
             else:
                 result["skipped_reason"] = "No changes were made"
-                logger.info(f"Skipping {repo}: no changes made")
+            logger.info(f"  └─ Skipped")
             return result
+        
+        step_progress(3, TOTAL_STEPS, "Changes", f"✓ applied ({', '.join(modified_files) if modified_files else 'done'})")
         
         # Re-check PR in case it was created between initial check and now
         if not existing_pr_url:
@@ -1212,49 +1371,55 @@ def process_repository(
         
         # If PR exists and we're not updating, skip (don't commit)
         if existing_pr_url and not update_existing_pr:
+            step_progress(4, TOTAL_STEPS, "Push", "⊘ skipped")
+            step_progress(5, TOTAL_STEPS, "PR", "⊘ already exists")
             result["status"] = "skipped"
             result["skipped"] = True
             result["skipped_reason"] = "PR already exists (use --update-existing-pr to commit to existing branch)"
             result["pr_url"] = existing_pr_url
-            logger.info(f"Skipping {repo}: PR already exists at {existing_pr_url}")
-            logger.info(f"  → To commit these changes to the existing PR, run with: --update-existing-pr")
+            logger.info(f"  └─ PR already exists")
             return result
         
         # Commit changes (to new branch or existing PR branch)
         if existing_pr_url and update_existing_pr:
-            logger.info(f"Committing to existing PR: {existing_pr_url}")
+            logger.info(f"  → Committing to existing PR")
         if not commit_changes(repo_path, commit_message, dry_run):
             result["status"] = "skipped"
             result["skipped"] = True
             result["skipped_reason"] = "No changes to commit"
+            logger.info(f"  └─ No changes to commit")
             return result
         
-        # Push branch
+        # Step 4: Push
+        step_progress(4, TOTAL_STEPS, "Push", "...")
         if not push_branch(repo_path, branch_name, dry_run):
+            step_progress(4, TOTAL_STEPS, "Push", "✗ failed")
             result["status"] = "failed"
             result["error"] = "Failed to push branch"
             return result
+        step_progress(4, TOTAL_STEPS, "Push", "✓")
         
-        # Create PR (or return existing if updating)
+        # Step 5: PR
+        step_progress(5, TOTAL_STEPS, "PR", "...")
         pr_url, is_existing = create_pull_request(
             repo, branch_name, pr_title, pr_body, base_branch, dry_run, update_existing_pr
         )
         
         if not pr_url:
+            step_progress(5, TOTAL_STEPS, "PR", "✗ failed")
             result["status"] = "failed"
             result["error"] = "Failed to create pull request"
             return result
         
         result["pr_url"] = pr_url
-        if is_existing:
-            result["status"] = "success"
-            logger.info(f"Updated existing PR branch: {pr_url}")
-        else:
-            result["status"] = "success"
+        step_progress(5, TOTAL_STEPS, "PR", "✓")
+        logger.info(f"      {pr_url}")
+        result["status"] = "success"
+        logger.info(f"  └─ Done")
         return result
         
     except Exception as e:
-        logger.error(f"Error processing {repo}: {e}")
+        logger.error(f"  └─ Error: {e}")
         result["status"] = "failed"
         result["error"] = str(e)
         return result
@@ -1273,7 +1438,28 @@ def main():
     parser.add_argument(
         "--repos-file",
         default=None,
-        help="Path to file containing repository list (default: use REPOS from config.py)"
+        help="Path to file containing repository list (one owner/repo per line)"
+    )
+    parser.add_argument(
+        "--org",
+        nargs="?",
+        default=None,
+        const=GITHUB_ORG,
+        metavar="ORG",
+        help="List repos from GitHub org and then select. Use --org ORG (e.g., gdncomm) or --org to use GITHUB_ORG from config."
+    )
+    parser.add_argument(
+        "--team",
+        nargs="?",
+        default=None,
+        const=GITHUB_TEAM,
+        metavar="TEAM",
+        help="Filter by GitHub team: list only repos for this team (e.g., TMS-DEPLOYMENT-NONPROD). Requires --org. Use --team alone to use GITHUB_TEAM from config."
+    )
+    parser.add_argument(
+        "--no-select",
+        action="store_true",
+        help="Process all repos without selection prompt (default: prompt to select when interactive)"
     )
     parser.add_argument(
         "--dry-run",
@@ -1348,31 +1534,53 @@ def main():
         logger.info("DRY RUN MODE - No changes will be made")
         logger.info("=" * 60)
     
-    # Read repositories
-    if args.repos_file:
+    # Read repositories: default to org + team from config when no args
+    use_org_mode = (args.org is not None or GITHUB_ORG) and not args.repos_file
+    if use_org_mode:
+        # List repos from GitHub org (--org or GITHUB_ORG from config), optionally filtered by team
+        org = args.org if args.org is not None else GITHUB_ORG
+        team = args.team if args.team is not None else GITHUB_TEAM
+        if not org:
+            logger.error("--org requires an org name (e.g., --org gdncomm) or set GITHUB_ORG in config.py")
+            sys.exit(1)
+        if team:
+            logger.info(f"Listing repositories for team '{team}' in org: {org}")
+            repos = list_repos_from_github_team(org, team)
+            if not repos:
+                logger.error(f"No repositories found for team {team} in org {org} (check team name/slug and 'gh auth status')")
+                sys.exit(1)
+            logger.info(f"Found {len(repos)} repositories for team {team}")
+        else:
+            logger.info(f"Listing repositories from GitHub org: {org}")
+            repos = list_repos_from_github_org(org)
+            if not repos:
+                logger.error(f"No repositories found in org {org} (check 'gh auth status' and org name)")
+                sys.exit(1)
+            logger.info(f"Found {len(repos)} repositories in org {org}")
+    elif args.repos_file:
         # Use file if specified
         repos = read_repos_file(args.repos_file)
         if not repos:
             logger.error(f"No repositories found in {args.repos_file}")
             sys.exit(1)
+        logger.info(f"Using {len(repos)} repositories from {args.repos_file}")
     else:
-        # Use REPOS from config.py
-        repos = []
-        for repo in REPOS:
-            # Normalize repo format (handles URLs and owner/repo format)
-            normalized = normalize_repo_name(repo)
-            if normalized and '/' in normalized:
-                repos.append(normalized)
-            else:
-                logger.warning(f"Invalid repository format in config.py: {repo}")
-        
-        if not repos:
-            logger.error("No valid repositories found in config.py REPOS list")
-            sys.exit(1)
-        
-        logger.info(f"Using {len(repos)} repositories from config.py")
+        # No org and no repos file: need GITHUB_ORG in config or --org / --repos-file
+        logger.error(
+            "No repository source. Set GITHUB_ORG (and optionally GITHUB_TEAM) in config.py, "
+            "or use --org ORG [--team TEAM], or --repos-file PATH."
+        )
+        sys.exit(1)
     
-    logger.info(f"Found {len(repos)} repositories to process")
+    # Interactive selection (unless --no-select or dry-run with no TTY)
+    if not args.no_select and repos:
+        selected = select_repos_interactive(repos)
+        if not selected:
+            sys.exit(0)
+        repos = selected
+        logger.info(f"Processing {len(repos)} selected repositories")
+    else:
+        logger.info(f"Found {len(repos)} repositories to process")
     
     # Debug: if True keep clones, if False delete after run (--debug / --no-debug override config)
     debug = args.debug
@@ -1402,8 +1610,7 @@ def main():
     for i, repo in enumerate(repos, 1):
         repo = normalize_repo_name(repo)
         logger.info("=" * 60)
-        logger.info(f"Processing repository {i}/{len(repos)}: {repo}")
-        logger.info("=" * 60)
+        logger.info(f"  [{i}/{len(repos)}] {repo}")
         
         result = process_repository(
             repo=repo,
